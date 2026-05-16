@@ -4,6 +4,15 @@ import { CATEGORIES, type Receipt } from "@/lib/types";
 
 const client = new Anthropic();
 
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB cap to limit Anthropic cost amplification
+const ALLOWED_MIME = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+  "application/pdf",
+]);
+
 export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData();
@@ -13,18 +22,25 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "No file uploaded" }, { status: 400 });
     }
 
+    if (!ALLOWED_MIME.has(file.type)) {
+      return NextResponse.json(
+        { error: "Please upload an image (JPEG/PNG/GIF/WebP) or PDF file" },
+        { status: 400 }
+      );
+    }
+
+    if (file.size > MAX_UPLOAD_BYTES) {
+      return NextResponse.json(
+        { error: `File too large (max ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB)` },
+        { status: 413 }
+      );
+    }
+
     const bytes = await file.arrayBuffer();
     const base64 = Buffer.from(bytes).toString("base64");
 
     const isImage = file.type.startsWith("image/");
     const isPdf = file.type === "application/pdf";
-
-    if (!isImage && !isPdf) {
-      return NextResponse.json(
-        { error: "Please upload an image (JPEG/PNG) or PDF file" },
-        { status: 400 }
-      );
-    }
 
     const mediaType = isPdf
       ? "application/pdf"
@@ -101,7 +117,16 @@ If you cannot read certain values, make your best estimate. Always return valid 
 
     // Parse the JSON response, stripping any markdown fences if present
     const jsonStr = text.replace(/```json?\n?/g, "").replace(/```\n?/g, "").trim();
-    const extracted = JSON.parse(jsonStr);
+    let extracted: Record<string, unknown>;
+    try {
+      extracted = JSON.parse(jsonStr);
+    } catch {
+      console.error("Model returned non-JSON output:", jsonStr.slice(0, 500));
+      return NextResponse.json(
+        { error: "Could not parse model response" },
+        { status: 502 }
+      );
+    }
 
     const receipt: Receipt = {
       id: crypto.randomUUID(),
@@ -129,8 +154,9 @@ If you cannot read certain values, make your best estimate. Always return valid 
     return NextResponse.json(receipt);
   } catch (error) {
     console.error("Extraction error:", error);
-    const message =
-      error instanceof Error ? error.message : "Failed to process file";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json(
+      { error: "Failed to process file" },
+      { status: 500 }
+    );
   }
 }
